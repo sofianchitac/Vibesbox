@@ -11,7 +11,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 - `VibesboxSRC/` — VibesboxSRC (Raspberry Pi 4B): source selection, sample-rate conversion, NDI/S/PDIF output
 - `VibesboxDSP/` — VibesboxDSP (LattePanda Mu, Windows 11): full DSP chain, speaker output
-- `README-Vibesbox-Ecosystem.md` — canonical system-level architecture document; read this first for any cross-system work
+- `README.md` — canonical system-level architecture document (the Vibesbox umbrella repo's landing page); read this first for any cross-system work
 
 ---
 
