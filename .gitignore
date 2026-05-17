@@ -1,0 +1,13 @@
+# Subproject repos — owned by their own .git directories
+# (sofianchitac/VibesboxSRC and sofianchitac/VibesboxDSP).
+# Option (c) umbrella: this repo only carries the cross-system docs.
+VibesboxSRC/
+VibesboxDSP/
+
+# Pre-session investigation note that was never committed to VibesboxSRC.
+# Lives at the parent level by accident; keep out of the umbrella too.
+investigate-FFmpeg-ARDFTSRC.md
+
+# Local-only
+.claude/
+.DS_Store
