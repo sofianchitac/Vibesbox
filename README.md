@@ -144,7 +144,7 @@ The LattePanda Mu runs Windows 11 and hosts the entire DSP chain. It is configur
 
 - **Pi Pico MIDI controller** — three physical potentiometers, presented to Windows as a USB MIDI device (`SOFIAN-MIDI`), sending MIDI CC0 (master volume), CC1 and CC2 (tone parameters) on channel 1.
 
-See `README-VibesboxDSP.md` for full operational detail.
+See [VibesboxDSP/README.md](VibesboxDSP/README.md) for full operational detail.
 
 ---
 
