@@ -113,6 +113,8 @@ The Pi acts as a headless source-selection and resampling appliance. All audio i
 
 - **Touchscreen UI** — a vanilla HTML/CSS/JavaScript web dashboard served by nginx (port 80), rendered in Chromium kiosk mode via Sway on the 800×480 Waveshare DSI display setuped in portrait mode. Connects to the auto-router WebSocket for live state and to CamillaDSP's native WebSocket for RMS level meters.
 
+- **Remote Dashboard** ([VibesboxSRC/ui/remote/](https://github.com/sofianchitac/VibesboxSRC/tree/main/ui/remote)) — a second page served by the same nginx at `http://vibesbox-src.local/remote/`. Aggregates the SRC mirror, the Now Playing card, and a token-gated break-glass panel into one view that any LAN device can open. Read-only for VibesboxSRC state; the touchscreen on the Pi remains the authoritative control surface.
+
 **Routing matrix:**
 
 | Input | Output | Path | Use case |
@@ -143,6 +145,8 @@ The LattePanda Mu runs Windows 11 and hosts the entire DSP chain. It is configur
 - **REAPER** — runs as a scheduled task at startup and hosts the VST3 plugin DSP chain. Also receives MIDI CC from the Pi Pico controller for real-time parameter control.
 
 - **Pi Pico MIDI controller** — three physical potentiometers, presented to Windows as a USB MIDI device (`SOFIAN-MIDI`), sending MIDI CC0 (master volume), CC1 and CC2 (tone parameters) on channel 1.
+
+- **VibesboxBreakGlass** ([VibesboxDSP/VibesboxBreakGlass](https://github.com/sofianchitac/VibesboxDSP/tree/master/VibesboxBreakGlass)) — a tiny HTTP service in the user session that exposes a token-gated remote escape hatch on `:8091`. The Pi-served [Remote Dashboard](#remote-dashboard) uses it to open `cmd.exe`, open `explorer.exe`, or kill the kiosk from any LAN device. Built as the recovery prerequisite for the deferred kiosk hardening (Shell Launcher V2 / Keyboard Filter / UWF) — once those land, this service is the only inbound way back in.
 
 See [VibesboxDSP/README.md](VibesboxDSP/README.md) for full operational detail.
 
