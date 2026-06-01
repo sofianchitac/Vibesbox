@@ -53,18 +53,18 @@ The system is split into two sub-projects running on separate, dedicated hardwar
 │            VibesboxSRC                  │            │              VibesboxDSP                 │
 │         (Raspberry Pi 4B)               │            │      (LattePanda Mu / Windows 11)        │
 │                                         │            │                                          │
-│  Audio Sources (any one active)         │            │  NdiAsioReceiver (Scheduled Task,        │
+│  Audio Sources (any mix; all summed)    │            │  NdiAsioReceiver (Scheduled Task,        │
 │  ┌──────────────┐                       │            │   user session — required by ReaRoute)   │
 │  │ USB Audio    │──┐                    │            │  Receives NDI 6ch → writes to ReaRoute   │
 │  │ (UAC2)       │  │                    │            │  ↓                                       │
 │  ├──────────────┤  │                    │            │  REAPER (RME ASIO for hardware I/O;      │
-│  │ Lyrion /     │──┤  CamillaDSP        │            │   ReaRoute as a parallel ASIO transport  │
-│  │ Squeezebox   │  │  Synchronous       │            │   for NDI 6ch inputs)                    │
-│  ├──────────────┤  │  resample          │            │  ↓                                       │
-│  │ AirPlay      │──┤  → 96 kHz          │            │  Full DSP chain (Penteo upmix, Dirac     │
-│  │ (shairport)  │  │  → upmix/downmix   │            │   room correction, crossovers, limiting) │
-│  ├──────────────┤  │  per user-selected │            │  ↓                                       │
-│  │ Bluetooth    │──┘  output channels   │            │  ASIO outputs → Amplifiers → Speakers    │
+│  │ Lyrion /     │──┤  ardftsrc per src  │            │   ReaRoute as a parallel ASIO transport  │
+│  │ Squeezebox   │  │  → 96 kHz, then    │            │   for NDI 6ch inputs)                    │
+│  ├──────────────┤  │  PipeWire sums all │            │  ↓                                       │
+│  │ AirPlay      │──┤  unmuted sources   │            │  Full DSP chain (Penteo upmix, Dirac     │
+│  │ (shairport)  │  │  → CamillaDSP      │            │   room correction, crossovers, limiting) │
+│  ├──────────────┤  │  (native PipeWire, │            │  ↓                                       │
+│  │ Bluetooth    │──┘  no upmix on Pi)   │            │  ASIO outputs → Amplifiers → Speakers    │
 │  │ (bluealsa)   │                       │            │                                          │
 │  └──────────────┘                       │            │  Pi Pico MIDI (CC0 vol, CC1/CC2 tone)    │
 │                                         │            │  VibesboxKiosk (WinUI 3, 1024×768)       │
@@ -74,9 +74,9 @@ The system is split into two sub-projects running on separate, dedicated hardwar
 │   • 6ch mode: NDI to NdiAsioReceiver   ─┼──────────► │                                          │
 │                                         │  S/PDIF 2ch│                                          │
 │                                        ─┼──────────► │                                          │
-│  auto_router.py — source detection,     │            │                                          │
-│  config switching, Bluetooth mgmt,      │            │                                          │
-│  WebSocket state → touchscreen UI       │            │                                          │
+│  source_router.py — activity detect,    │            │                                          │
+│  PipeWire routing, per-source mute,     │            │                                          │
+│  Bluetooth mgmt, WebSocket state → UI   │            │                                          │
 │                                         │            │                                          │
 │  Now Playing pipeline:                  │            │                                          │
 │   nowplaying_server (HTTP+WS :8090)     │  WS push   │                                          │
@@ -91,7 +91,7 @@ The system is split into two sub-projects running on separate, dedicated hardwar
                     └──────────── Local wired Ethernet ───────────┘
 ```
 
-> **Topology note (important).** There is no source-to-transport mapping. *Any* source (USB Audio, Lyrion, AirPlay, Bluetooth) can be routed via either output transport (2ch S/PDIF or 6ch NDI). The user picks **2ch or 6ch** in the Pi touchscreen UI; CamillaDSP handles upmixing (2ch → 6ch via Hafler) or downmixing (6ch → 2ch) accordingly. The four CamillaDSP configs cover all combinations.
+> **Topology note (important).** There is no source-to-transport mapping. *Any* source can be routed via either output transport (2ch S/PDIF or 6ch NDI). The user picks **2ch or 6ch** in the Pi touchscreen UI, independently of which source is active. The Pi does **no upmixing**: for 6ch NDI it passes the summed bus through (a stereo source sits in FL/FR, rears silent), for 2ch S/PDIF it downmixes 6ch→2ch. All stereo-to-surround upmixing happens on the LattePanda (Penteo 360). Bluetooth pairing is live, but its audio path is deferred.
 
 ---
 
@@ -103,30 +103,32 @@ The Pi acts as a headless source-selection and resampling appliance. All audio i
 
 **Architecture — key components:**
 
-- **CamillaDSP (v4.1.3)** — open-source Rust-based DSP engine running as a systemd service. Performs all sample-rate conversion using the `Synchronous` resampler profile. All routing configurations (`2ch→2ch`, `2ch→6ch`, `6ch→2ch`, `6ch→6ch`) apply -4 dB intersample headroom protection before the mixer stage.
+- **System-mode PipeWire + WirePlumber** — the audio graph. PipeWire is hard-pinned to 96 kHz and **sums all unmuted sources** into CamillaDSP; WirePlumber applies the rules that name the output sinks (`sink.spdif`, `sink.ndi-feed`) and assign clock authority. This replaces the v1 single-source CamillaDSP hot-swap.
 
-- **auto_router.py** — the central Python daemon. Polls ALSA `hw_params` and the UAC2 Gadget capture rate control every 200 ms to detect which source is active, then hot-swaps the live CamillaDSP configuration without restarting the process. Also manages Bluetooth power and pairing state, and exposes a WebSocket server on port 8080 for the touchscreen UI.
+- **Per-source ardftsrc bridges** — each active source is resampled to 96 kHz by its own ffmpeg/librempeg `ardftsrc` (DFT) filter before the sum bus (`ardftsrc-bridge@<source>` systemd template). One instance each for USB, Lyrion, and AirPlay; source_router starts and stops them on demand.
 
-- **USB Audio Gadget (UAC2)** — the Pi presents itself to a connected source device (iPad, PC, etc.) as a 6-channel USB audio device (using `libcomposite`/`dwc2`), supporting sample rates from 44.1 kHz to 192 kHz. `camilladsp-controller` watches the incoming rate and updates CamillaDSP in real time.
+- **CamillaDSP (v4.1.3, native PipeWire backend)** — open-source Rust DSP engine running as a systemd service. In v2 it sits at a fixed 96 kHz (no coarse rate conversion — that moved to the bridges) with two static configs: a 6ch passthrough for NDI and a 6ch→2ch downmix for S/PDIF, both applying intersample headroom protection.
+
+- **source_router.py** — the central Python daemon (replaces `auto_router.py`). Detects source activity at the ALSA layer, manages the ardftsrc bridge lifecycle, and links/unlinks each source into CamillaDSP over PipeWire (per-source **mute = unlink**). Pushes the active CamillaDSP config, manages Bluetooth power and pairing state, and exposes a WebSocket server on port 8080 for the touchscreen UI.
+
+- **USB Audio Gadget (UAC2)** — the Pi presents itself to a connected source device (iPad, PC, etc.) as a 6-channel USB audio device (using `libcomposite`/`dwc2`), supporting sample rates from 44.1 kHz to 192 kHz. Its `ardftsrc-bridge@usb` reads the raw gadget capture device directly.
 
 - **ndi_transmitter.py** — reads CamillaDSP's 6ch processed output from the `NDITX` ALSA loopback and transmits it as the NDI source `VibesboxSRC-5.1` using the NDI SDK v6 via ctypes. Stopped automatically when 2ch output mode is selected to save CPU.
 
-- **Touchscreen UI** — a vanilla HTML/CSS/JavaScript web dashboard served by nginx (port 80), rendered in Chromium kiosk mode via Sway on the 800×480 Waveshare DSI display setuped in portrait mode. Connects to the auto-router WebSocket for live state and to CamillaDSP's native WebSocket for RMS level meters.
+- **Touchscreen UI** — a vanilla HTML/CSS/JavaScript web dashboard served by nginx (port 80), rendered in Chromium kiosk mode via Sway on the 800×480 Waveshare DSI display in portrait mode. Connects to the source_router WebSocket for live state (per-source mute toggles) and to CamillaDSP's native WebSocket for RMS level meters.
 
 - **Remote Dashboard** ([VibesboxSRC/ui/remote/](https://github.com/sofianchitac/VibesboxSRC/tree/main/ui/remote)) — a second page served by the same nginx at `http://vibesbox-src.local/remote/`. Aggregates the SRC mirror, the Now Playing card, and a token-gated break-glass panel into one view that any LAN device can open. Read-only for VibesboxSRC state; the touchscreen on the Pi remains the authoritative control surface.
 
-**Routing matrix:**
+**Output matrix** — the input to CamillaDSP is always the 96 kHz, 6ch PipeWire sum bus, so the config is chosen by the user-selected **output mode** alone:
 
-| Input | Output | Path | Use case |
-|---|---|---|---|
-| 2ch (Lyrion / AirPlay / Bluetooth) | 2ch | CamillaDSP → HiFiBerry S/PDIF | 2ch input to REAPER via S/PDIF |
-| 2ch | 6ch | CamillaDSP + Hafler upmix → NDI | 6ch upmixed input to REAPER via NDI |
-| 6ch (USB) | 6ch | CamillaDSP passthrough → NDI | 6ch input to REAPER via NDI |
-| 6ch (USB) | 2ch | CamillaDSP downmix → HiFiBerry S/PDIF | 2ch downmixed input to REAPER via S/PDIF |
+| Output mode | CamillaDSP config | Path |
+|---|---|---|
+| 6ch (NDI) | `dsp_6ch` — passthrough | sum bus → NDI `VibesboxSRC-5.1` → REAPER |
+| 2ch (S/PDIF) | `dsp_2ch` — 6ch→2ch downmix | sum bus → HiFiBerry S/PDIF → REAPER |
 
-**Source priority:** "last active wins" for auto-switching. Bluetooth is always manual (requires explicit UI tap to activate or pair).
+**Source model:** all unmuted, playing sources are summed by PipeWire; the UI offers per-source mute toggles (plus "Unmute All"). Bluetooth is always manual (requires an explicit UI tap to pair).
 
-**Key design decision — Double Neutral startup:** CamillaDSP starts with a `RawFile`/`Null` neutral config (reading from `/dev/zero`, writing to `/dev/null`). This allows it to boot in milliseconds without locking any ALSA device. The auto-router swaps in the real hardware config only when a source becomes active, and returns to neutral when all sources go idle — releasing ALSA handles so sample-rate changes can propagate.
+**Key design decision — config-less startup:** CamillaDSP boots with `-w` (no config) so it starts without locking devices. Once PipeWire is up, source_router pushes the active `dsp_<mode>` config — and that push is what creates CamillaDSP's graph nodes. (Replaces the v1 "Double Neutral" `RawFile`/`Null` boot.)
 
 ---
 
@@ -203,9 +205,9 @@ Both devices must be on the same wired Ethernet segment. Wi-Fi introduces jitter
 Pi 4B ──────── Ethernet switch ──────── LattePanda Mu
  (vibesbox-src.local)                   (vibesbox-dsp)
  NDI TX: VibesboxSRC-5.1   ─────────►  NdiAsioReceiver (Scheduled Task)
- auto_router WS:    :8080   (LAN)       REAPER + TotalMix FX
+ source_router WS:  :8080   (LAN)       REAPER + TotalMix FX
  nowplaying WS+HTTP :8090               ReaRoute ASIO + RME ASIO
- CamillaGUI:        :5005               AudioFingerprintService (Scheduled Task)
+ CamillaDSP WS:     :1234               AudioFingerprintService (Scheduled Task)
 ```
 
 NDI source discovery uses mDNS/Avahi — no static IP configuration required, provided both devices are on the same subnet.
@@ -217,13 +219,14 @@ NDI source discovery uses mDNS/Avahi — no static IP configuration required, pr
 Understanding the startup order matters because audio services have hard dependencies.
 
 **Pi (VibesboxSRC):**
-1. `alsa-loopback.service` — loads `snd-aloop` with 4 virtual loopback cards (Lyrion, AirPlay, Bluetooth, NDITX).
+1. `alsa-loopback.service` — loads `snd-aloop` (loopback cards: Lyrion, AirPlay, Bluetooth, NDITX).
 2. `usb-gadget.service` — configures the UAC2 6ch USB gadget via `libcomposite`.
-3. `camilladsp.service` — starts CamillaDSP with the neutral `RawFile`/`Null` config (`-w` flag keeps WebSocket port alive).
-4. `auto-router.service` — connects to CamillaDSP, begins polling, starts WebSocket server on :8080.
-5. `ndi-output.service` — starts only when 6ch output mode is active; stopped by auto-router when 2ch is selected.
-6. Source services (`squeezelite`, `shairport-sync`, `bluealsa`) start independently.
-7. `greetd` + `sway` + Chromium — launches the touchscreen dashboard.
+3. `pipewire.service` + `wireplumber.service` — bring up the system-mode 96 kHz audio graph and its session manager.
+4. `camilladsp.service` — starts CamillaDSP (native PipeWire backend) config-less (`-w` keeps the WebSocket port alive).
+5. `source-router.service` — links the graph, pushes the active CamillaDSP config, starts the WebSocket server on :8080.
+6. `ndi-output.service` — starts only in 6ch output mode; stopped by source-router when 2ch is selected.
+7. Source services (`squeezelite`, `shairport-sync`, `bluealsa`) start independently; `ardftsrc-bridge@<source>` instances start on demand.
+8. `greetd` + `sway` + Chromium — launches the touchscreen dashboard.
 
 **LattePanda (VibesboxDSP):**
 1. `NdiAsioReceiver` Scheduled Task triggers at user logon — opens **ReaRoute ASIO** (NOT RME), outputs silence, begins NDI discovery. Must be in the user session (not Session 0) so ReaRoute can route audio to REAPER.

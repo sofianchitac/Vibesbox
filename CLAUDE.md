@@ -18,23 +18,25 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## System Architecture
 
 ```
-Pi 4B (VibesboxSRC)                         LattePanda Mu (VibesboxDSP)
-────────────────────────────────────        ────────────────────────────────────
-USB Audio (UAC2)       ─┐                   NdiAsioReceiver (Scheduled Task)
-Lyrion/Squeezebox       ├─► CamillaDSP      ← NDI 6ch 96kHz FLTP → ReaRoute ASIO
-AirPlay (shairport)     │   96kHz FLTP      RME Digiface ASIO ← HiFiBerry S/PDIF (2ch 96kHz)
-Bluetooth (bluealsa) ───┘   user-selected   TotalMix FX (hardware-side routing only)
-                            2ch or 6ch out  REAPER (RME + ReaRoute, VST3 DSP chain)
-                                            └─► Amplifiers → Speakers
-HiFiBerry S/PDIF (2ch 96kHz, when 2ch mode) Pi Pico (SOFIAN-MIDI) ──── USB MIDI CC ──► REAPER (vol/tone real-time control)
-                                            VibesboxKiosk (WinUI 3 touchscreen app)
-                                            AudioFingerprintService (Scheduled Task, USB metadata)
-Touchscreen UI (:80) ←─── auto_router WS (:8080)
+Pi 4B (VibesboxSRC)                          LattePanda Mu (VibesboxDSP)
+─────────────────────────────────────        ────────────────────────────────────
+USB Audio (UAC2) ─┐ per-source               NdiAsioReceiver (Scheduled Task)
+Lyrion           ├─ ardftsrc ─► PipeWire     ← NDI 6ch 96kHz FLTP → ReaRoute ASIO
+AirPlay          │  (→96kHz)    sum bus       RME Digiface ASIO ← HiFiBerry S/PDIF (2ch)
+Bluetooth* ──────┘              │             TotalMix FX (hardware-side routing only)
+                                ▼             REAPER (RME + ReaRoute, VST3 DSP chain:
+                       CamillaDSP (native       Penteo 360 upmix, Dirac room correction)
+                       PipeWire backend)      └─► Amplifiers → Speakers
+                       └─ outputs 6ch NDI or  Pi Pico (SOFIAN-MIDI) ─ USB MIDI CC ─► REAPER
+                          2ch S/PDIF to DSP    VibesboxKiosk (WinUI 3 touchscreen app)
+                       (user selects 2|6ch)    AudioFingerprintService (Scheduled Task)
+Touchscreen UI (:80) ←─── source_router WS (:8080)
 Now Playing HTTP+WS (:8090) ────────────────────────► VibesboxKiosk subscribes
+* Bluetooth: pairing live; audio path deferred (no resampler bridge yet)
 ```
 
 The **network interfaces** between the two units:
-- **Audio**: either NDI `VibesboxSRC-5.1` (6ch, 96kHz, 32-bit float planar) OR S/PDIF 2ch via HiFiBerry → RME Digiface. The user selects 2ch or 6ch output in the Pi UI; the choice is independent of which source is active. CamillaDSP upmixes (Hafler) or downmixes as needed.
+- **Audio**: either NDI `VibesboxSRC-5.1` (6ch, 96kHz, 32-bit float planar) OR S/PDIF 2ch via HiFiBerry → RME Digiface. The user selects 2ch or 6ch output in the Pi UI; the choice is independent of which source is active. The Pi does **no upmixing** — for NDI it passes the 6ch sum bus through (a stereo source sits in FL/FR, rears silent), for S/PDIF it downmixes 6ch→2ch. All stereo-to-surround upmixing happens on the LattePanda (Penteo 360).
 - **Now Playing metadata**: `nowplaying_server` on the Pi (:8090) exposes a JSON WS + HTTP API; VibesboxKiosk subscribes via WebSocket. AudioFingerprintService on the LattePanda uploads silence-gated 7-second WAV clips to `POST /api/fingerprint`; the Pi runs `shazamio` server-side and broadcasts matches. Tap is at the REAPER level, so it covers both audio paths (NDI 6ch *and* S/PDIF 2ch) — no per-transport configuration.
 
 Both devices must be on wired Ethernet — Wi-Fi causes audible dropouts on NDI.
@@ -43,34 +45,41 @@ Both devices must be on wired Ethernet — Wi-Fi causes audible dropouts on NDI.
 
 ## VibesboxSRC — Key Files & Components
 
-`VibesboxSRC/scripts/auto_router.py` — Central daemon. Polls ALSA `hw_params` every 200ms, detects active source, hot-swaps CamillaDSP config without restart, manages Bluetooth pairing state machine, runs WebSocket server on :8080 for the UI.
+`VibesboxSRC/scripts/source_router.py` — Central daemon (replaces the v1 `auto_router.py`). Detects source activity at the ALSA layer, starts/stops the per-source ardftsrc bridges, and links/unlinks each source into CamillaDSP over PipeWire (`pw-link`). Pushes the active CamillaDSP config, manages the Bluetooth pairing state machine, and runs the UI WebSocket on :8080. Per-source **mute = unlink**; multiple unmuted sources are summed.
 
-`VibesboxSRC/scripts/ndi_transmitter.py` — Reads CamillaDSP 6ch output from `NDITX` ALSA loopback, transmits as `VibesboxSRC-5.1` via NDI SDK v6 (ctypes/libndi.so). Auto-started/stopped by auto_router based on output mode.
+`VibesboxSRC/scripts/ardftsrc_bridge.sh` + `services/ardftsrc-bridge@.service` — Per-source resampler. An ffmpeg/librempeg `ardftsrc` (DFT) filter reads a source at its native rate and emits a `source.<name>.ardftsrc` PipeWire node at 96kHz. One templated instance per active source (USB, Lyrion, AirPlay); source_router owns their lifecycle.
 
-`VibesboxSRC/camilladsp/*.yml` — Four routing configs: `2ch→2ch`, `2ch→6ch` (Hafler upmix), `6ch→2ch` (downmix), `6ch→6ch` (passthrough). All apply -4dB intersample headroom. CamillaDSP boots from a neutral RawFile/Null config and the auto-router hot-swaps the real config on demand.
+`VibesboxSRC/scripts/ndi_transmitter.py` — Reads CamillaDSP's 6ch output from the `NDITX` ALSA loopback, transmits as `VibesboxSRC-5.1` via the NDI SDK (ctypes/libndi.so). Started/stopped by source_router based on output mode.
 
-`VibesboxSRC/ui/` — Vanilla HTML/CSS/JS dashboard served by nginx on :80. Connects to auto_router WebSocket (:8080) for state and CamillaDSP WebSocket (:5005) for RMS meters.
+`VibesboxSRC/camilladsp/dsp_2ch.yml` / `dsp_6ch.yml` — The two **static** v2 configs (CamillaDSP native PipeWire backend). `dsp_6ch` passes the 6ch sum bus through → NDI; `dsp_2ch` downmixes 6ch→2ch → S/PDIF. Their device blocks are byte-identical, so a 2ch↔6ch output toggle never reopens a PipeWire node. CamillaDSP boots config-less (`-w`) and source_router pushes the active config on connect. (The legacy v1 `*_to_*.yml` matrix is kept on disk but unused.)
+
+`VibesboxSRC/config/pipewire/` + `config/wireplumber/` — System-mode PipeWire (the 96kHz-pinned audio graph that sums sources) and the WirePlumber rules naming the `sink.spdif`, `sink.ndi-feed`, and `source.usb` nodes and assigning output-sink clock authority.
+
+`VibesboxSRC/ui/` — Vanilla HTML/CSS/JS dashboard served by nginx on :80. Connects to source_router WebSocket (:8080) for state and CamillaDSP's native WebSocket (:1234) for RMS meters.
 
 `VibesboxSRC/services/*.service` — systemd unit files. Boot order matters (see below).
 
 `VibesboxSRC/install.sh` — One-time installation script (run as root on the Pi).
 
 ### Pi Boot Order (hard dependencies)
-1. `alsa-loopback` — loads `snd-aloop` (4 virtual loopback cards)
+1. `alsa-loopback` — loads `snd-aloop` (loopback cards)
 2. `usb-gadget` — configures UAC2 6ch USB gadget
-3. `camilladsp` — starts with neutral config
-4. `auto-router` — begins polling, starts WebSocket
-5. `ndi-output` — conditional; managed by auto-router
-6. Source services (`squeezelite`, `shairport-sync`, `bluealsa`)
-7. `greetd` + `sway` + Chromium (touchscreen dashboard, 800×480 portrait)
+3. `pipewire` + `wireplumber` — system-mode audio graph (96kHz) + session manager
+4. `camilladsp` — native PipeWire backend, boots config-less (`-w`)
+5. `source-router` — links the graph, pushes the CamillaDSP config, starts the :8080 WebSocket
+6. `ndi-output` — conditional; managed by source-router
+7. Source services (`squeezelite`, `shairport-sync`, `bluealsa`) + on-demand `ardftsrc-bridge@` instances
+8. `greetd` + `sway` + Chromium (touchscreen dashboard, 800×480 portrait)
 
 ### ALSA Loopback Cards
-| Name | Card | Source |
-|------|------|--------|
-| Lyrion | hw:Lyrion,1,0 (card 10) | squeezelite |
-| AirPlay | hw:AirPlay,1,0 (card 11) | shairport-sync |
-| Bluetooth | hw:Bluetooth,1,0 (card 12) | bluealsa |
-| NDITX | card 13 | CamillaDSP 6ch output |
+| Name | Card | Write side | Read side |
+|------|------|-----------|-----------|
+| Lyrion | card 10 | squeezelite | `ardftsrc-bridge@lyrion` |
+| AirPlay | card 11 | shairport-sync | `ardftsrc-bridge@airplay` |
+| Bluetooth | card 12 | bluealsa | unused (audio path deferred) |
+| NDITX | card 13 | CamillaDSP 6ch output | `ndi_transmitter.py` |
+
+USB Audio is **not** a loopback — `ardftsrc-bridge@usb` reads the raw `hw:UAC2Gadget` capture device directly.
 
 ---
 
@@ -93,17 +102,16 @@ Both devices must be on wired Ethernet — Wi-Fi causes audible dropouts on NDI.
 ### VibesboxSRC (on the Pi)
 ```bash
 # Check service status
-systemctl status auto-router camilladsp ndi-output
+systemctl status pipewire wireplumber source-router camilladsp ndi-output
 
-# Follow auto-router logs (main daemon)
-journalctl -u auto-router -f
+# Follow the main daemon's logs
+journalctl -u source-router -f
 
-# Reload a CamillaDSP config without restarting
-# (auto_router does this automatically, but manually:)
-curl -s http://localhost:5005/api/setconfig -d @camilladsp/config_2ch_2ch.yml
+# Inspect the PipeWire graph (nodes + links)
+XDG_RUNTIME_DIR=/run/pipewire pw-link -l
 
-# Restart the UI stack
-sudo systemctl restart sway
+# Restart the UI stack (sway runs under the greetd session, not a system unit)
+sudo systemctl restart greetd
 
 # One-time installation (as root)
 sudo bash install.sh
@@ -131,9 +139,9 @@ dotnet publish -c Release -r win-x64 --self-contained -o publish\
 - **Dual-Brain architecture (why two devices):** The split is not a workaround — it is a requirement. VibesboxDSP's ASIO engine and VST3 chain (Dirac Live, Penteo 360) require a **fixed, stable sample rate**. VibesboxSRC (the Pi) is a dedicated normalisation engine: it resamples all incoming sources to 96 kHz using CamillaDSP so the DSP unit's clock domain never resets when a source changes.
 - **Core purpose — upmixing and room correction:** While the input is typically stereo, the output is **almost always multichannel**. High-quality upmixing (Penteo 360) and room correction (Dirac Live) are only possible with commercial VST3 plugins on Windows (iLok/PACE/UA Connect licensing). Windows is the correct platform choice, not a compromise.
 - **NDI transport** — HiFiBerry Digi2 Pro is stereo S/PDIF only; there is no multichannel hardware output on the Pi. NDI over Ethernet is the only viable multichannel path.
-- **Double Neutral startup** — CamillaDSP boots with `RawFile`/`Null` (reads `/dev/zero`, writes `/dev/null`). This lets it start without locking any ALSA device; the auto-router hot-swaps the real config when a source becomes active.
-- **Zero ALSA resampling** — `defaults.pcm.rate_converter "none"`. All SRC is done by CamillaDSP using the `Synchronous` profile.
-- **"Last active wins"** — source auto-switching uses this rule; Bluetooth is always manual.
+- **Config-less CamillaDSP startup** — CamillaDSP boots with `-w` (no config) so it starts without locking devices; source_router pushes the active `dsp_<mode>.yml` once PipeWire is up, and that push is what creates CamillaDSP's graph nodes. (Replaces the v1 "Double Neutral" `RawFile`/`Null` boot.)
+- **Explicit resampling, no hidden SRC** — `defaults.pcm.rate_converter "none"` keeps ALSA from silently resampling. Coarse rate conversion (source-native → 96kHz) is done **per-source by the ardftsrc bridges** before the PipeWire sum bus; CamillaDSP then runs 96kHz→96kHz only. PipeWire's adaptive resampler stays in the path for clock-drift correction.
+- **Source summing with per-source mute** — PipeWire sums every unmuted, playing source; the UI exposes per-source mute toggles (mute = unlink) instead of the v1 "last active wins" single-source switch. Bluetooth pairing is always manual.
 - **Ring buffer clock drift recovery** — 85ms buffer + 5s watchdog in NdiAsioReceiver handles independent Pi ALSA clock vs. LattePanda RME ASIO clock. The occasional buffer flush (brief silence, immediate recovery) is an accepted trade-off for Hi-Fi home listening where millisecond latency is not critical.
 - **Hardening is deferred, not abandoned** — Shell Launcher V2, Keyboard Filter, and UWF are intentionally deferred until the DSP chain and OSC/ReaLearn mappings are finalised. UWF makes every config iteration require a commit before reboot; Shell Launcher V2 hit five separate bring-up issues during Task 8. These will be re-enabled before any uncontrolled deployment. Do not treat their absence as technical debt to clean up.
 
