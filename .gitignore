@@ -11,3 +11,7 @@ investigate-FFmpeg-ARDFTSRC.md
 # Local-only
 .claude/
 .DS_Store
+.vscode/settings.json
+
+# Claude Code project instructions — kept local, not published to the remote.
+CLAUDE.md
