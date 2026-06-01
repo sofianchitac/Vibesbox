@@ -244,6 +244,10 @@ Understanding the startup order matters because audio services have hard depende
 
 The system is currently deployed and in daily use. The VibesboxKiosk (WinUI 3 touchscreen app) is running on the LattePanda. Both sub-projects are stable.
 
+### VibesboxSRC v2 — PipeWire backbone (live)
+
+The Pi now **boots the v2 PipeWire architecture by default** (cut over and reboot-safe; user-confirmed audio). v2 replaces the v1 single-source CamillaDSP config hot-swap (`auto_router.py`) with a system-mode PipeWire graph that **sums all unmuted sources** at 96 kHz, fed by per-source `ardftsrc` resampler bridges, with CamillaDSP on its native PipeWire backend (`source_router.py` as the routing daemon). All stereo-to-surround upmixing now lives on the LattePanda (Penteo 360) — the Pi only passes through or downmixes. v1 is retained on disk as rollback (and tagged `v1-rollback`); `install.sh` reproduces the v2 stack on a fresh flash. Bluetooth pairing is live; its audio path is the one piece still deferred. See the [VibesboxSRC README](https://github.com/sofianchitac/VibesboxSRC) for the full v2 detail.
+
 The **Now Playing pipeline** is fully operational:
 - Pi side: `nowplaying_server` + `metadata_orchestrator` + four producers (shairport, lms, bluealsa, generic) deployed as systemd services. Each transport-tier source (AirPlay / Lyrion / Bluetooth) emits structured metadata; USB Audio falls through to fingerprinting.
 - Windows side: `AudioFingerprintService` taps REAPER via ReaRoute, uploads silence-gated 7-second WAV clips to the Pi. The Pi runs `shazamio` server-side on the `/api/fingerprint` endpoint and broadcasts matches over the same WS channel as the other producers. Works for any audio reaching REAPER, regardless of which transport (NDI 6ch or S/PDIF 2ch) the Pi is currently using.
