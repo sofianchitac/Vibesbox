@@ -148,6 +148,8 @@ The LattePanda Mu runs Windows 11 and hosts the entire DSP chain. It is configur
 
 - **Pi Pico MIDI controller** — three physical potentiometers, presented to Windows as a USB MIDI device (`SOFIAN-MIDI`), sending MIDI CC0 (master volume), CC1 and CC2 (tone parameters) on channel 1.
 
+- **VibesboxKiosk** ([VibesboxDSP/VibesboxKiosk](https://github.com/sofianchitac/VibesboxDSP/tree/master/VibesboxKiosk)) — the single-screen WinUI 3 touchscreen app on the LattePanda's 1024×768 panel, and the unit's primary on-device control surface. Controls REAPER (the DSP host) over OSC and mirrors the Pi dashboard's visual language so the two units feel like one product. Hosts the `NowPlayingCard`, which subscribes to the Pi's `nowplaying_server` WebSocket. Deployed and in daily use.
+
 - **VibesboxBreakGlass** ([VibesboxDSP/VibesboxBreakGlass](https://github.com/sofianchitac/VibesboxDSP/tree/master/VibesboxBreakGlass)) — a tiny HTTP service in the user session that exposes a token-gated remote escape hatch on `:8091`. The Pi-served [Remote Dashboard](#remote-dashboard) uses it to open `cmd.exe`, open `explorer.exe`, or kill the kiosk from any LAN device. Built as the recovery prerequisite for the deferred kiosk hardening (Shell Launcher V2 / Keyboard Filter / UWF) — once those land, this service is the only inbound way back in.
 
 See [VibesboxDSP/README.md](VibesboxDSP/README.md) for full operational detail.
